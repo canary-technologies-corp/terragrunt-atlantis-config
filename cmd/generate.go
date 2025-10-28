@@ -6,11 +6,13 @@ import (
 	"sort"
 
 	"github.com/hashicorp/go-getter"
-	log "github.com/sirupsen/logrus"
+	logrus "github.com/sirupsen/logrus"
 
 	"github.com/ghodss/yaml"
 	"github.com/gruntwork-io/terragrunt/config"
 	"github.com/gruntwork-io/terragrunt/options"
+	"github.com/gruntwork-io/terragrunt/pkg/log"
+	"github.com/gruntwork-io/terragrunt/pkg/log/format"
 	"github.com/spf13/cobra"
 
 	"golang.org/x/sync/errgroup"
@@ -25,6 +27,15 @@ import (
 	"sync"
 )
 
+func init() {
+	// Initialize the default logger for terragrunt operations
+	formatter := format.NewFormatter(format.NewBareFormatPlaceholders())
+	log.SetOptions(
+		log.WithOutput(os.Stderr),
+		log.WithFormatter(formatter),
+	)
+}
+
 // Parse env vars into a map
 func getEnvs() map[string]string {
 	envs := os.Environ()
@@ -36,6 +47,11 @@ func getEnvs() map[string]string {
 	}
 
 	return m
+}
+
+// getLogger returns a properly initialized logger for terragrunt operations
+func getLogger() log.Logger {
+	return log.Default()
 }
 
 // Terragrunt imports can be relative or absolute
@@ -151,13 +167,15 @@ func getDependencies(ctx *config.ParsingContext, path string) ([]string, error) 
 		}
 
 		// Parse the HCL file
-		parseCtx := config.NewParsingContext(ctx, ctx.TerragruntOptions).
+		logger := getLogger()
+		ctxWithLogger := log.ContextWithLogger(ctx, logger)
+		parseCtx := config.NewParsingContext(ctxWithLogger, logger, ctx.TerragruntOptions).
 			WithDecodeList(
 				config.DependencyBlock,
 				config.DependenciesBlock,
 				config.TerraformBlock,
 			)
-		parsedConfig, err := config.PartialParseConfigFile(parseCtx, path, nil)
+		parsedConfig, err := config.PartialParseConfigFile(parseCtx, logger, path, nil)
 		if err != nil {
 			getDependenciesCache.set(path, getDependenciesOutput{nil, err})
 			return nil, err
@@ -262,7 +280,9 @@ func getDependencies(ctx *config.ParsingContext, path string) ([]string, error) 
 			terrOpts, _ := options.NewTerragruntOptionsWithConfigPath(depPath)
 			terrOpts.OriginalTerragruntConfigPath = ctx.TerragruntOptions.OriginalTerragruntConfigPath
 			terrOpts.Env = ctx.TerragruntOptions.Env
-			terrContext := config.NewParsingContext(ctx, terrOpts)
+			logger := getLogger()
+			ctxWithLogger := log.ContextWithLogger(ctx, logger)
+			terrContext := config.NewParsingContext(ctxWithLogger, logger, terrOpts)
 			childDeps, err := getDependencies(terrContext, depPath)
 			if err != nil {
 				continue
@@ -328,7 +348,9 @@ func createProject(ctx context.Context, sourcePath string) (*AtlantisProject, er
 	options.OriginalTerragruntConfigPath = sourcePath
 	options.Env = getEnvs()
 
-	parsingContext := config.NewParsingContext(ctx, options)
+	logger := getLogger()
+	ctx = log.ContextWithLogger(ctx, logger)
+	parsingContext := config.NewParsingContext(ctx, logger, options)
 	dependencies, err := getDependencies(parsingContext, sourcePath)
 	if err != nil {
 		return nil, err
@@ -446,7 +468,9 @@ func createHclProject(ctx context.Context, sourcePaths []string, workingDir stri
 	}
 	projectHclOptions.Env = getEnvs()
 
-	parsingContext := config.NewParsingContext(ctx, projectHclOptions)
+	logger := getLogger()
+	ctx = log.ContextWithLogger(ctx, logger)
+	parsingContext := config.NewParsingContext(ctx, logger, projectHclOptions)
 	locals, err := parseLocals(parsingContext, projectHclFile, nil)
 	if err != nil {
 		return nil, err
@@ -502,7 +526,9 @@ func createHclProject(ctx context.Context, sourcePaths []string, workingDir stri
 			return nil, err
 		}
 		opt.Env = getEnvs()
-		parsingContext := config.NewParsingContext(ctx, opt)
+		logger := getLogger()
+		ctxWithLogger := log.ContextWithLogger(ctx, logger)
+		parsingContext := config.NewParsingContext(ctxWithLogger, logger, opt)
 		dependencies, err := getDependencies(parsingContext, sourcePath)
 		if err != nil {
 			return nil, err
@@ -684,7 +710,7 @@ func getAllTerragruntProjectHclFiles() map[string][]string {
 		})
 
 		if err != nil {
-			log.Fatal(err)
+			logrus.Fatal(err)
 		}
 
 		for _, uniquePath := range orderedHclFilePaths[projectHclFile] {
@@ -796,7 +822,7 @@ func main(cmd *cobra.Command, args []string) error {
 						for i := range config.Projects {
 							if config.Projects[i].Dir == project.Dir {
 								updateProject = true
-								log.Info("Updated project for ", terragruntPath)
+								logrus.Info("Updated project for ", terragruntPath)
 								config.Projects[i] = *project
 
 								// projects should be unique, let's exit for loop for performance
@@ -806,11 +832,11 @@ func main(cmd *cobra.Command, args []string) error {
 						}
 
 						if !updateProject {
-							log.Info("Created project for ", terragruntPath)
+							logrus.Info("Created project for ", terragruntPath)
 							config.Projects = append(config.Projects, *project)
 						}
 					} else {
-						log.Info("Created project for ", terragruntPath)
+						logrus.Info("Created project for ", terragruntPath)
 						config.Projects = append(config.Projects, *project)
 					}
 
@@ -843,7 +869,7 @@ func main(cmd *cobra.Command, args []string) error {
 				lock.Lock()
 				defer lock.Unlock()
 
-				log.Info("Created "+projectHcl+" project for ", workingDir)
+				logrus.Info("Created "+projectHcl+" project for ", workingDir)
 				config.Projects = append(config.Projects, *project)
 
 				return nil
@@ -906,7 +932,7 @@ func main(cmd *cobra.Command, args []string) error {
 
 		if hasChanges {
 			// Should be unreachable
-			log.Warn("Computing execution_order_groups failed. Probably cycle exists")
+			logrus.Warn("Computing execution_order_groups failed. Probably cycle exists")
 		}
 
 		// Sort by execution_order_group
@@ -937,7 +963,7 @@ func main(cmd *cobra.Command, args []string) error {
 	if len(outputPath) != 0 {
 		os.WriteFile(outputPath, []byte(yamlString), 0644)
 	} else {
-		log.Println(yamlString)
+		logrus.Println(yamlString)
 	}
 
 	return nil
@@ -988,7 +1014,7 @@ func init() {
 
 	pwd, err := os.Getwd()
 	if err != nil {
-		log.Fatal(err)
+		logrus.Fatal(err)
 	}
 
 	generateCmd.PersistentFlags().BoolVar(&autoPlan, "autoplan", false, "Enable auto plan. Default is disabled")
